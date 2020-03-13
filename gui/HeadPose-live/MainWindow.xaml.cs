@@ -53,6 +53,8 @@ using FaceDetectorInterop;
 using ZeroMQ;
 using System.Drawing;
 using System.Collections.Concurrent;
+using FaceAnalyser_Interop;
+using System.Globalization;
 
 namespace HeadPoseLive
 {
@@ -122,10 +124,36 @@ namespace HeadPoseLive
         volatile bool running = true;
         volatile bool pause = false;
 
+        #region Phil
+        public bool DynamicAUModels { get; set; } = true;
+        int image_output_size = 112;
+        public bool MaskAligned { get; set; } = true; // Should the aligned images be masked
+        string aus = "AU01,AU02,AU04,AU05,AU06,AU07,AU09,AU10,AU12,AU14,AU15,AU17,AU20,AU23,AU25,AU26,AU45";
+        string aus_r;
+        string aus_c;
+        CultureInfo cultureInfo = new CultureInfo("en-GB");
+        #endregion
+
+        private void initAUs()
+        {
+
+            StringBuilder sbr = new StringBuilder();
+            StringBuilder sbc = new StringBuilder();
+            foreach (string c in aus.Split(','))
+            {
+                sbr.Append(c);
+                sbr.Append("_r,");
+                sbc.Append(c);
+                sbc.Append("_c,");
+            }
+            aus_r = sbr.ToString().Substring(0, sbr.Length - 1);
+            aus_c = sbc.ToString().Substring(0, sbc.Length - 1);
+        }
+
         public void StartExperiment()
         {
+            initAUs();
             // Inquire more from the user
-
             // Get the entry dialogue now for the subject ID
             trial_id = 0;
             TextEntryWindow subject_id_window = new TextEntryWindow();
@@ -237,7 +265,7 @@ namespace HeadPoseLive
                 img_height = cam_select.selected_camera.Item3;
 
                 UtilitiesOF.SequenceReader reader = new UtilitiesOF.SequenceReader(cam_id, img_width, img_height);
-                
+
                 if (reader.IsOpened())
                 {
 
@@ -283,10 +311,11 @@ namespace HeadPoseLive
 
         }
 
-        private bool ProcessFrame(CLNF landmark_detector, GazeAnalyserManaged gaze_analyser, FaceModelParameters model_params, RawImage frame, RawImage grayscale_frame, float fx, float fy, float cx, float cy)
+        private bool ProcessFrame(CLNF landmark_detector, GazeAnalyserManaged gaze_analyser, FaceAnalyserManaged face_analyser, FaceModelParameters model_params, RawImage frame, RawImage grayscale_frame, float fx, float fy, float cx, float cy)
         {
             bool detection_succeeding = landmark_detector.DetectLandmarksInVideo(frame, model_params, grayscale_frame);
             gaze_analyser.AddNextFrame(landmark_detector, detection_succeeding, fx, fy, cx, cy);
+            face_analyser.AddNextFrame(frame, landmark_detector.CalculateAllLandmarks(), detection_succeeding, false);
             return detection_succeeding;
 
         }
@@ -367,6 +396,7 @@ namespace HeadPoseLive
         // Capturing and processing the video frame by frame
         private void VideoLoop(UtilitiesOF.SequenceReader reader)
         {
+            int frameNumber = 0;
             Thread.CurrentThread.IsBackground = true;
 
             String root = AppDomain.CurrentDomain.BaseDirectory;
@@ -383,11 +413,13 @@ namespace HeadPoseLive
 
             CLNF face_model = new CLNF(model_params);
             GazeAnalyserManaged gaze_analyser = new GazeAnalyserManaged();
+            FaceAnalyserManaged face_analyser = new FaceAnalyserManaged(AppDomain.CurrentDomain.BaseDirectory, DynamicAUModels, image_output_size, MaskAligned);
 
             DateTime? startTime = CurrentTime;
 
             var lastFrameTime = CurrentTime;
-
+            Stopwatch stopWatch = new Stopwatch();
+            stopWatch.Start();
             while (running)
             {
 
@@ -403,12 +435,12 @@ namespace HeadPoseLive
                 var grayFrame = reader.GetCurrentFrameGray();
 
                 if (mirror_image)
-                { 
+                {
                     frame.Mirror();
                     grayFrame.Mirror();
                 }
 
-                bool detectionSucceeding = ProcessFrame(face_model, gaze_analyser, model_params, frame, grayFrame, reader.GetFx(), reader.GetFy(), reader.GetCx(), reader.GetCy());
+                bool detectionSucceeding = ProcessFrame(face_model, gaze_analyser, face_analyser, model_params, frame, grayFrame, reader.GetFx(), reader.GetFy(), reader.GetCx(), reader.GetCy());
 
                 lock (recording_lock)
                 {
@@ -449,6 +481,7 @@ namespace HeadPoseLive
                 {
                     face_model.Reset();
                     reset = false;
+                    frameNumber = 0;
                 }
 
                 // Visualisation updating
@@ -456,6 +489,8 @@ namespace HeadPoseLive
                 {
                     Dispatcher.Invoke(DispatcherPriority.Render, new TimeSpan(0, 0, 0, 0, 200), (Action)(() =>
                     {
+                        Thread.CurrentThread.CurrentCulture = cultureInfo;
+                        Thread.CurrentThread.CurrentUICulture = cultureInfo;
                         if (latest_img == null)
                             latest_img = frame.CreateWriteableBitmap();
 
@@ -550,20 +585,52 @@ namespace HeadPoseLive
                             webcam_img.GazeLines.Add(gaze_lines);
 
                             // Publish the information for other applications
-                            String str_head_pose = String.Format("{0}:{1:F2}, {2:F2}, {3:F2}, {4:F2}, {5:F2}, {6:F2}", "HeadPose", pose[0], pose[1], pose[2],
-                                pose[3] * 180 / Math.PI, pose[4] * 180 / Math.PI, pose[5] * 180 / Math.PI);
+                            if (frameNumber % 100 == 0)
+                            {
+                                zero_mq_socket.Send(new ZFrame(
+                                    String.Format("HEADER:" +
+                                    "frame,face_id,timestamp,confidence,success," +
+                                    "gaze_0_x,gaze_0_y,gaze_0_z," +
+                                    "gaze_1_x,gaze_1_y,gaze_1_z," +
+                                    "gaze_angle_x,gaze_angle_y," +
+                                    "pose_Tx,pose_Ty,pose_Tz,pose_Rx,pose_Ry,pose_Rz," +
+                                    "{0},{1}", aus_r, aus_c),
+                                    Encoding.UTF8));
+                            }
 
-                            zero_mq_socket.Send(new ZFrame(str_head_pose, Encoding.UTF8));
+                            var gazeCams = gaze_analyser.GetGazeCamera();
+                            String fid = String.Format("{0},-1,{1:F2},{2:F2},{3}", frameNumber, stopWatch.Elapsed.TotalSeconds, confidence, detectionSucceeding?"1":"0");
+                            String str_gaze_0 = String.Format(",{0:F2},{1:F2},{2:F2}",  gazeCams.Item1.Item1, gazeCams.Item1.Item2, gazeCams.Item1.Item3);
+                            String str_gaze_1 = String.Format(",{0:F2},{1:F2},{2:F2}", gazeCams.Item2.Item1, gazeCams.Item2.Item2, gazeCams.Item2.Item3);
+                            String str_gaze_angle = String.Format(",{0:F2},{1:F2}", gaze_angle.Item1, gaze_angle.Item2);
+                            String str_head_pose = String.Format(",{0:F2},{1:F2},{2:F2},{3:F2},{4:F2},{5:F2}", pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]);
 
-                            String str_gaze = String.Format("{0}:{1:F2}, {2:F2}", "GazeAngle", gaze_angle.Item1 * (180.0 / Math.PI), gaze_angle.Item2 * (180.0 / Math.PI));
-                            
-                            zero_mq_socket.Send(new ZFrame(str_gaze, Encoding.UTF8));
+                            StringBuilder strBuilder = new StringBuilder();
+                            strBuilder.Append("DATA:");
+                            strBuilder.Append(fid);
+                            strBuilder.Append(str_gaze_0);
+                            strBuilder.Append(str_gaze_1);
+                            strBuilder.Append(str_gaze_angle);
+                            strBuilder.Append(str_head_pose);
+
+                            Dictionary<string, double> dic = face_analyser.GetCurrentAUsReg();
+                            foreach (string key in aus.Split(','))
+                            {
+                                strBuilder.AppendFormat(",{0:F2}", dic[key]);
+                            }
+                            dic = face_analyser.GetCurrentAUsClass();
+                            foreach (string key in aus.Split(','))
+                            {
+                                strBuilder.AppendFormat(",{0:F2}", dic[key]);
+                            }
+
+                            zero_mq_socket.Send(new ZFrame(strBuilder.ToString(), Encoding.UTF8));
                         }
+                        ++frameNumber;
                     }));
 
                     while (running & pause)
                     {
-
                         Thread.Sleep(10);
                     }
 
@@ -574,6 +641,7 @@ namespace HeadPoseLive
                     break;
                 }
             }
+            stopWatch.Stop();
             reader.Close();
             System.Console.Out.WriteLine("Thread finished");
         }
@@ -701,7 +769,7 @@ namespace HeadPoseLive
             {
                 processing_thread.Join();
             }
-            
+
         }
 
         private void MorrorButton_Click(object sender, RoutedEventArgs e)
@@ -722,7 +790,7 @@ namespace HeadPoseLive
                 PauseButton.Content = "Pause";
             }
         }
-       
+
         private void ScreenshotButton_Click(object sender, RoutedEventArgs e)
         {
 
