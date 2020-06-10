@@ -133,6 +133,8 @@ namespace OpenFaceOffline
         public bool RecordGaze { get; set; } = true; // Eye gaze
         public bool RecordTracked { get; set; } = true; // Recording tracked videos or images
 
+        public bool BroadcastZeroMQ { get; set; } = false; // Recording tracked videos or images
+
         // Visualisation options
         public bool ShowTrackedVideo { get; set; } = true; // Showing the actual tracking
         public bool ShowAppearance { get; set; } = true; // Showing appeaance features like HOG
@@ -229,23 +231,27 @@ namespace OpenFaceOffline
 
         void ZeroMQStart()
         {
-            // Create the ZeroMQ context for broadcasting the results
-            zero_mq_context = ZContext.Create();
-            zero_mq_socket = new ZSocket(zero_mq_context, ZSocketType.PUB);
+            if (BroadcastZeroMQ)
+            {
+                // Create the ZeroMQ context for broadcasting the results
+                zero_mq_context = ZContext.Create();
+                zero_mq_socket = new ZSocket(zero_mq_context, ZSocketType.PUB);
 
-            // Bind on localhost port 5000
-            zero_mq_socket.Bind("tcp://127.0.0.1:5000");
+                // Bind on localhost port 5000
+                zero_mq_socket.Bind("tcp://127.0.0.1:5000");
+            }
         }
 
         void ZeroMQStop()
         {
-            zero_mq_socket.Close();
+            if (BroadcastZeroMQ)
+                zero_mq_socket.Close();
         }
 
         void ZeroMQPublishHeader()
         {
             // Publish the information for other applications
-            if (frameNumber % 100 == 0)
+            if (BroadcastZeroMQ && frameNumber % 100 == 0)
             {
                 string msg = String.Format("HEADER:" +
                     "frame,face_id,timestamp,confidence,success," +
@@ -735,38 +741,41 @@ namespace OpenFaceOffline
                     AlignedHOG.Source = latest_HOG_descriptor;
                 }
 
-                ZeroMQPublishHeader();
-                Thread.CurrentThread.CurrentCulture = cultureInfo;
-                Thread.CurrentThread.CurrentUICulture = cultureInfo;
-                //ZeroMQPublishData();
-                // Publish ZeroMQ
-                String fid = String.Format("{0},-1,{1:F2},{2:F2},{3}", frameNumber, stopWatch.Elapsed.TotalSeconds, confidence, detection_succeeding ? "1" : "0");
-                String str_gaze_0 = String.Format(",{0:F2},{1:F2},{2:F2}", gazeCams.Item1.Item1, gazeCams.Item1.Item2, gazeCams.Item1.Item3);
-                String str_gaze_1 = String.Format(",{0:F2},{1:F2},{2:F2}", gazeCams.Item2.Item1, gazeCams.Item2.Item2, gazeCams.Item2.Item3);
-                String str_gaze_angle = String.Format(",{0:F2},{1:F2}", gaze_angle.Item1, gaze_angle.Item2);
-                String str_head_pose = String.Format(",{0:F2},{1:F2},{2:F2},{3:F2},{4:F2},{5:F2}", pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]);
-
-                StringBuilder strBuilder = new StringBuilder();
-                strBuilder.Append("DATA:");
-                strBuilder.Append(fid);
-                strBuilder.Append(str_gaze_0);
-                strBuilder.Append(str_gaze_1);
-                strBuilder.Append(str_gaze_angle);
-                strBuilder.Append(str_head_pose);
-
-                Dictionary<string, double> dic = face_analyser.GetCurrentAUsReg();
-                foreach (string key in aus.Split(','))
+                if (BroadcastZeroMQ)
                 {
-                    strBuilder.AppendFormat(",{0:F2}", dic[key]);
+                    ZeroMQPublishHeader();
+                    Thread.CurrentThread.CurrentCulture = cultureInfo;
+                    Thread.CurrentThread.CurrentUICulture = cultureInfo;
+                    //ZeroMQPublishData();
+                    // Publish ZeroMQ
+                    String fid = String.Format("{0},-1,{1:F2},{2:F2},{3}", frameNumber, stopWatch.Elapsed.TotalSeconds, confidence, detection_succeeding ? "1" : "0");
+                    String str_gaze_0 = String.Format(",{0:F2},{1:F2},{2:F2}", gazeCams.Item1.Item1, gazeCams.Item1.Item2, gazeCams.Item1.Item3);
+                    String str_gaze_1 = String.Format(",{0:F2},{1:F2},{2:F2}", gazeCams.Item2.Item1, gazeCams.Item2.Item2, gazeCams.Item2.Item3);
+                    String str_gaze_angle = String.Format(",{0:F2},{1:F2}", gaze_angle.Item1, gaze_angle.Item2);
+                    String str_head_pose = String.Format(",{0:F2},{1:F2},{2:F2},{3:F2},{4:F2},{5:F2}", pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]);
+
+                    StringBuilder strBuilder = new StringBuilder();
+                    strBuilder.Append("DATA:");
+                    strBuilder.Append(fid);
+                    strBuilder.Append(str_gaze_0);
+                    strBuilder.Append(str_gaze_1);
+                    strBuilder.Append(str_gaze_angle);
+                    strBuilder.Append(str_head_pose);
+
+                    Dictionary<string, double> dic = face_analyser.GetCurrentAUsReg();
+                    foreach (string key in aus.Split(','))
+                    {
+                        strBuilder.AppendFormat(",{0:F2}", dic[key]);
+                    }
+                    dic = face_analyser.GetCurrentAUsClass();
+                    foreach (string key in aus.Split(','))
+                    {
+                        strBuilder.AppendFormat(",{0:F2}", dic[key]);
+                    }
+                    string msg = strBuilder.ToString();
+                    //Console.WriteLine(msg);
+                    zero_mq_socket.Send(new ZFrame(msg, Encoding.UTF8));
                 }
-                dic = face_analyser.GetCurrentAUsClass();
-                foreach (string key in aus.Split(','))
-                {
-                    strBuilder.AppendFormat(",{0:F2}", dic[key]);
-                }
-                string msg = strBuilder.ToString();
-                //Console.WriteLine(msg);
-                zero_mq_socket.Send(new ZFrame(msg, Encoding.UTF8));
             }));
 
 
